@@ -220,7 +220,12 @@ class Renderer {
           sfx.play('flame', vol(e.x, e.y));
           break;
         case 'hit':
-          for (let i = 0; i < 3; i++) this.particles.push({ x: e.x, y: e.y, vx: rnd(-90, 90), vy: rnd(-90, 90), life: 0.35, max: 0.35, r: rnd(1.5, 3), col: '150,10,10', drag: 3 });
+          // Blut spritzt in Schussrichtung
+          for (let i = 0; i < 6; i++) {
+            const a = (e.a || 0) + rnd(-0.5, 0.5), sp = rnd(60, 220);
+            this.particles.push({ x: e.x, y: e.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 0.35, max: 0.35, r: rnd(1.5, 3), col: '150,10,10', drag: 4 });
+          }
+          if (!this.hudOnly && e.d > 0) this.splat(e.x + Math.cos(e.a || 0) * 18, e.y + Math.sin(e.a || 0) * 18, 5);
           sfx.play('hit', vol(e.x, e.y));
           break;
         case 'kill':
@@ -280,7 +285,9 @@ class Renderer {
           if (e.c === 'soldat') this.particles.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: 0.4, max: 0.4, r: 20, grow: 160, col: '255,80,60', ring: 1, glow: 1 });
           if (e.id === myId) this.msg(CLASSES[e.c].abil + '!', CLASSES[e.c].color, 1.5);
           break;
-        case 'reload': if (e.id === myId) sfx.play('reload', 0.8); break;
+        // in 3D kommen die Nachladegeräusche Schritt für Schritt aus der Animation
+        case 'reload': if (e.id === myId && !this.hudOnly) sfx.play('reload', 0.8); break;
+        case 'zatt': if (!this.hudOnly) sfx.play('growl', vol(e.x, e.y)); break;
         case 'swap': if (e.id === myId) sfx.play('swap', 0.8); break;
         case 'empty': if (e.id === myId) sfx.play('empty', 0.8); break;
         case 'over': sfx.play('over', 1); break;
@@ -814,6 +821,16 @@ class Renderer {
     g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     g.textBaseline = 'alphabetic';
     this.lastAim = input.state.a;
+
+    // dunkle Ränder für die Horror-Optik (nur 3D)
+    if (this.hudOnly) {
+      if (!this.vignette || this.vignette.w !== W || this.vignette.h !== H) {
+        const gr = g.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.hypot(W, H) * 0.55);
+        gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(0.7, 'rgba(10,0,0,.35)'); gr.addColorStop(1, 'rgba(5,0,0,.8)');
+        this.vignette = { w: W, h: H, gr };
+      }
+      g.fillStyle = this.vignette.gr; g.fillRect(0, 0, W, H);
+    }
 
     // Roter Rand bei wenig Leben / Treffer
     if (me && me.s === 0) {

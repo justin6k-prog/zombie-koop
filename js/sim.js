@@ -356,7 +356,7 @@ class Game {
       if (z) {
         p.knifeT = 0.7;
         this.ev({ k: 'knife', x: p.x | 0, y: p.y | 0, a: +p.a.toFixed(2) });
-        this.damageZombie(z, CFG.KNIFE_DMG, p, true);
+        this.damageZombie(z, CFG.KNIFE_DMG, p, true, { a: p.a, w: 'knife' });
         p.fireT = Math.max(p.fireT, 0.3);
       }
     }
@@ -411,7 +411,7 @@ class Game {
         if (d2 > ws.range * ws.range) continue;
         if (Math.abs(angDiff(Math.atan2(z.y - gy, z.x - gx), p.a)) > ws.cone) continue;
         if (!this.los(gx, gy, z.x, z.y)) continue;
-        this.damageZombie(z, ws.dmg * mul, p, false);
+        this.damageZombie(z, ws.dmg * mul, p, false, { a: Math.atan2(z.y - gy, z.x - gx), w: 'flame' });
       }
       this.ev({ k: 'flame', id: p.id, x: gx | 0, y: gy | 0, a: +p.a.toFixed(2), up: slot.up ? 1 : 0 });
       return;
@@ -436,7 +436,7 @@ class Game {
         endT = hits.length ? hits[0][0] : wallT;
         this.explode(gx + dx * endT, gy + dy * endT, ws.splash, ws.dmg * mul, p);
       } else {
-        for (let h = 0; h < n; h++) this.damageZombie(hits[h][1], ws.dmg * mul, p, false);
+        for (let h = 0; h < n; h++) this.damageZombie(hits[h][1], ws.dmg * mul, p, false, { a, w: slot.id, x: gx + dx * hits[h][0], y: gy + dy * hits[h][0] });
         if (n && n === ws.pierce) endT = hits[n - 1][0];
       }
       this.ev({ k: 'shot', w: slot.id, up: slot.up ? 1 : 0, x: gx | 0, y: gy | 0, x2: (gx + dx * endT) | 0, y2: (gy + dy * endT) | 0, id: p.id });
@@ -445,7 +445,7 @@ class Game {
 
   explode(x, y, r, dmg, p) {
     for (const z of this.zombies.slice()) {
-      if (dist2(x, y, z.x, z.y) < (r + ZTYPES[z.type].r) ** 2) this.damageZombie(z, dmg, p, false);
+      if (dist2(x, y, z.x, z.y) < (r + ZTYPES[z.type].r) ** 2) this.damageZombie(z, dmg, p, false, { a: Math.atan2(z.y - y, z.x - x), w: 'boom' });
     }
     this.ev({ k: 'boom', x: x | 0, y: y | 0, r: r | 0 });
   }
@@ -457,16 +457,18 @@ class Game {
     return true;
   }
 
-  damageZombie(z, dmg, p, knife) {
+  // hit: { a: Schussrichtung, w: Waffe, x/y: Einschussstelle } für Blut und Gliedmaßen
+  damageZombie(z, dmg, p, knife, hit = {}) {
     if (z.hp <= 0) return;
     if (this.insta > 0) dmg = z.type === 3 ? dmg * 5 : z.hp;
     z.hp -= dmg;
-    this.ev({ k: 'hit', x: z.x | 0, y: z.y | 0 });
+    const ha = hit.a !== undefined ? hit.a : z.a + Math.PI;
+    this.ev({ k: 'hit', x: (hit.x !== undefined ? hit.x : z.x) | 0, y: (hit.y !== undefined ? hit.y : z.y) | 0, a: +ha.toFixed(2), zi: z.id, d: Math.round(dmg), w: hit.w || '' });
     if (z.hp > 0) { if (p) this.addPts(p, CFG.PTS_HIT); return; }
     const i = this.zombies.indexOf(z);
     if (i >= 0) this.zombies.splice(i, 1);
     if (p) { this.addPts(p, knife ? CFG.PTS_KNIFE : CFG.PTS_KILL); p.kills++; }
-    this.ev({ k: 'kill', x: z.x | 0, y: z.y | 0, t: z.type, a: +z.a.toFixed(2) });
+    this.ev({ k: 'kill', x: z.x | 0, y: z.y | 0, t: z.type, a: +z.a.toFixed(2), ba: +ha.toFixed(2), zi: z.id, w: hit.w || '', d: Math.round(dmg) });
     if (z.type === 3) this.dropPowerup(z.x, z.y, 'ammo');
     else if (this.puRound < 4 && Math.random() < 0.03) {
       const kinds = Object.keys(POWERUPS);
@@ -694,6 +696,7 @@ class Game {
       if (d < reach && z.attT <= 0) {
         z.attT = 1.0; z.att = 0.3;
         z.a = Math.atan2(tgt.y - z.y, tgt.x - z.x);
+        this.ev({ k: 'zatt', x: z.x | 0, y: z.y | 0, t: z.type, zi: z.id });
         this.damagePlayer(tgt, t.dmg);
       }
     }
@@ -736,7 +739,7 @@ class Game {
         t.fireT = 1 / 6;
         const gx = t.x + Math.cos(t.a) * 18, gy = t.y + Math.sin(t.a) * 18;
         this.ev({ k: 'shot', w: 'turret', up: 0, x: gx | 0, y: gy | 0, x2: best.x | 0, y2: best.y | 0, id: t.owner });
-        this.damageZombie(best, 45, this.players[t.owner], false);
+        this.damageZombie(best, 45, this.players[t.owner], false, { a: t.a, w: 'turret' });
       }
     }
   }
@@ -760,7 +763,7 @@ class Game {
     } else if (kind === 'insta') this.insta = 20;
     else if (kind === 'double') this.double = 20;
     else if (kind === 'nuke') {
-      for (const z of this.zombies) this.ev({ k: 'kill', x: z.x | 0, y: z.y | 0, t: z.type, a: +z.a.toFixed(2) });
+      for (const z of this.zombies) this.ev({ k: 'kill', x: z.x | 0, y: z.y | 0, t: z.type, a: +z.a.toFixed(2), ba: +(Math.random() * 6.28).toFixed(2), zi: z.id, w: 'boom', d: 9999 });
       this.zombies = [];
       for (const p of Object.values(this.players)) p.pts += CFG.PTS_NUKE;
     }

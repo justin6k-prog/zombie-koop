@@ -338,6 +338,36 @@ function showOver(snap) {
   $('over').style.display = 'flex';
 }
 
+// Eigene Bewegung sofort zeigen, statt auf den Host zu warten.
+// Weicht die Vorhersage zu weit vom Host ab, wird sie sanft (oder bei großem Fehler sofort) korrigiert.
+const pred = { x: 0, y: 0, ok: false, snap: null, sx: 0, sy: 0 };
+let predSolids = null, predDoors = '';
+function predict(dt) {
+  const snap = app.snap;
+  const me = snap && snap.pl.find(p => p.id === app.myId);
+  if (!me) { pred.ok = false; return; }
+  if (snap !== pred.snap) { pred.snap = snap; pred.sx = me.x; pred.sy = me.y; }
+  if (!pred.ok || me.s === 2) { pred.x = pred.sx; pred.y = pred.sy; pred.ok = true; }
+  const key = snap.doors.join('');
+  if (!predSolids || key !== predDoors) {
+    const m = renderer.map;
+    predDoors = key;
+    predSolids = m.walls.concat(m.decor, m.windows.map(w => w.rect), m.doors.filter((d, i) => !snap.doors[i]).map(d => d.rect));
+  }
+  if (me.s !== 2) {
+    let mx = input.state.mx, my = input.state.my;
+    const l = Math.hypot(mx, my);
+    if (l > 1) { mx /= l; my /= l; }
+    const sp = me.s === 1 ? CFG.DOWN_SPEED : CFG.PLAYER_SPEED;
+    pred.x += mx * sp * dt; pred.y += my * sp * dt;
+    pushOut(pred, CFG.PLAYER_R, predSolids);
+    const ex = pred.sx - pred.x, ey = pred.sy - pred.y, err = Math.hypot(ex, ey);
+    if (err > 100) { pred.x = pred.sx; pred.y = pred.sy; }
+    else if (err > 40 || (l < 0.1 && err > 2)) { const k = Math.min(1, (l < 0.1 ? 8 : 3) * dt); pred.x += ex * k; pred.y += ey * k; }
+  }
+  me.x = pred.x; me.y = pred.y;
+}
+
 let last = performance.now();
 function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
@@ -358,7 +388,8 @@ function loop(now) {
     }
     if (app.snap) {
       renderer.onEvents(evs, app.snap, app.myId, sfx);
-      if (renderer3d) renderer3d.onEvents(evs, app.myId);
+      if (!app.isHost) predict(dt);
+      if (renderer3d) renderer3d.onEvents(evs, app.myId, app.snap);
       if (app.view === '3d') renderer3d.draw(app.snap, app.myId, input, dt);
       renderer.draw(app.snap, app.myId, input, dt, app.isHost);
       if (!app.isHost && app.ping !== undefined) {
