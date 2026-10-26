@@ -39,7 +39,9 @@ class Renderer3D {
     this.sfx = r2d.sfx;
     this.map = r2d.map;
     this.gl = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
-    this.gl.setPixelRatio(Math.min(devicePixelRatio || 1, 1.5));
+    this.pr = Math.min(devicePixelRatio || 1, 1.5);
+    this.gl.setPixelRatio(this.pr);
+    this.fpsAvg = 60; this.qualT = 3;
     this.scene = new THREE.Scene();
     this.fogCol = new THREE.Color(0x0b0e0d);
     this.scene.background = this.fogCol;
@@ -864,11 +866,26 @@ class Renderer3D {
     if (this.corpses.length > 22) { const c = this.corpses.shift(); this.scene.remove(c.mesh); }
   }
 
+  // Wird das Bild zu langsam, Auflösung schrittweise senken
+  adaptQuality(dt) {
+    if (dt > 0) this.fpsAvg = this.fpsAvg * 0.95 + Math.min(120, 1 / dt) * 0.05;
+    this.qualT -= dt;
+    if (this.qualT > 0) return;
+    this.qualT = 2;
+    if (this.fpsAvg < 42 && this.pr > 0.75) {
+      this.pr = Math.max(0.75, this.pr - 0.25);
+      this.gl.setPixelRatio(this.pr);
+      this.resize();
+    }
+  }
+
   // ---------- Zeichnen ----------
   draw(snap, myId, input, dt) {
     this.time += dt;
     const me = snap.pl.find(p => p.id === myId);
-    const k = 1 - Math.exp(-dt * 18);
+    // Positionen kommen schon geglättet an (Host direkt, Mitspieler zwischengerechnet)
+    const k = 1;
+    this.adaptQuality(dt);
     const sm = (key, x, y, a) => {
       let s = this.smooth[key];
       if (!s || Math.abs(s.x - x) + Math.abs(s.y - y) > 160) s = this.smooth[key] = { x, y, a: a || 0, vx: 0 };
@@ -1080,7 +1097,7 @@ class Renderer3D {
     }
 
     this.decalT -= dt;
-    if (this.decalDirty && this.decalT <= 0) { this.decalTex.needsUpdate = true; this.decalDirty = false; this.decalT = 0.35; }
+    if (this.decalDirty && this.decalT <= 0) { this.decalTex.needsUpdate = true; this.decalDirty = false; this.decalT = 1; }
 
     for (const key in this.smooth) if (this.time - this.smooth[key].seen > 1) delete this.smooth[key];
     this.gl.render(this.scene, this.cam);

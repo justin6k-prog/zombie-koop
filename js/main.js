@@ -160,7 +160,7 @@ setInterval(() => {
 // 20x pro Sekunde Spielstand an alle
 setInterval(() => {
   if (!app.isHost || !app.game || !app.conns.length) { app.netEv = []; return; }
-  broadcast({ t: 's', s: app.game.snapshot(), ev: app.netEv });
+  broadcast({ t: 's', s: app.game.snapshot(), ev: app.netEv, ts: performance.now() });
   app.netEv = [];
 }, 50);
 
@@ -212,6 +212,11 @@ function connectToHost() {
       } else if (d.t === 's') {
         if (app.mode !== 'game') enterGame();
         app.snap = d.s;
+        // nach Sendezeit des Hosts ordnen; Verzögerung merken, um Schwankungen zu erkennen
+        app.snapBuf.push({ t: d.ts, s: d.s });
+        if (app.snapBuf.length > 20) app.snapBuf.shift();
+        app.lags.push(performance.now() - d.ts);
+        if (app.lags.length > 60) app.lags.shift();
         if (d.ev.length) app.evQueue.push(...d.ev);
       } else if (d.t === 'pong') app.ping = Math.round(performance.now() - d.ts);
     });
@@ -363,12 +368,54 @@ function predict(dt) {
     pushOut(pred, CFG.PLAYER_R, predSolids);
     const ex = pred.sx - pred.x, ey = pred.sy - pred.y, err = Math.hypot(ex, ey);
     if (err > 100) { pred.x = pred.sx; pred.y = pred.sy; }
-    else if (err > 40 || (l < 0.1 && err > 2)) { const k = Math.min(1, (l < 0.1 ? 8 : 3) * dt); pred.x += ex * k; pred.y += ey * k; }
+    // beim Laufen nur bei großem Fehler korrigieren (der Host-Stand ist immer etwas älter)
+    else if (err > 60 || (l < 0.1 && err > 3)) { const k = Math.min(1, (l < 0.1 ? 6 : 2) * dt); pred.x += ex * k; pred.y += ey * k; }
   }
   me.x = pred.x; me.y = pred.y;
 }
 
-let last = performance.now();
+// Mitspieler zeigen einen etwas älteren Stand und rechnen zwischen zwei Paketen weich durch.
+// Die Wartezeit passt sich an, wie stark die Pakete schwanken (z. B. iPhone bündelt WLAN-Pakete).
+app.snapBuf = [];
+app.lags = [];
+app.deadZ = new Map();
+function viewSnap() {
+  const latest = app.snap, buf = app.snapBuf;
+  const now = performance.now();
+  for (const [id, t] of app.deadZ) if (now - t > 1000) app.deadZ.delete(id);
+  if (buf.length < 2) return latest;
+  const minLag = Math.min(...app.lags), jitter = Math.max(...app.lags) - minLag;
+  const rt = now - minLag - Math.min(400, jitter + 30);   // Anzeigezeitpunkt in Host-Zeit
+  let i = buf.length - 1;
+  while (i > 0 && buf[i - 1].t > rt) i--;
+  const b = buf[i], a = buf[Math.max(0, i - 1)];
+  const f = a === b ? 1 : clamp((rt - a.t) / (b.t - a.t), 0, 1);
+  const out = Object.assign({}, b.s);
+  const za = a.s.z, zb = b.s.z, idx = new Map();
+  for (let j = 0; j < za.length; j += 7) idx.set(za[j], j);
+  const z = [];
+  for (let j = 0; j < zb.length; j += 7) {
+    if (app.deadZ.has(zb[j])) continue;
+    const row = zb.slice(j, j + 7), k = idx.get(zb[j]);
+    if (k !== undefined) {
+      row[2] = za[k + 2] + (zb[j + 2] - za[k + 2]) * f;
+      row[3] = za[k + 3] + (zb[j + 3] - za[k + 3]) * f;
+      row[4] = (za[k + 4] / 100 + angDiff(zb[j + 4] / 100, za[k + 4] / 100) * f) * 100;
+    }
+    z.push(...row);
+  }
+  out.z = z;
+  out.pl = b.s.pl.map(p => {
+    if (p.id === app.myId) return latest.pl.find(q => q.id === p.id) || p;  // eigene Figur: aktuell + vorhergesagt
+    const q = a.s.pl.find(x => x.id === p.id);
+    return q ? Object.assign({}, p, { x: q.x + (p.x - q.x) * f, y: q.y + (p.y - q.y) * f, a: q.a + angDiff(p.a, q.a) * f }) : p;
+  });
+  // Spielstand-Anzeigen (Punkte, Munition) immer aktuell
+  out.r = latest.r; out.ph = latest.ph; out.pt = latest.pt; out.pw = latest.pw; out.pa = latest.pa;
+  return out;
+}
+
+let last = performance.now(), fps = 60, fpsT = 0, fpsN = 0;
 function loop(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
@@ -387,17 +434,21 @@ function loop(now) {
       app.evQueue = [];
     }
     if (app.snap) {
-      renderer.onEvents(evs, app.snap, app.myId, sfx);
+      for (const e of evs) if (e.k === 'kill' && e.zi) app.deadZ.set(e.zi, performance.now());
       if (!app.isHost) predict(dt);
-      if (renderer3d) renderer3d.onEvents(evs, app.myId, app.snap);
-      if (app.view === '3d') renderer3d.draw(app.snap, app.myId, input, dt);
-      renderer.draw(app.snap, app.myId, input, dt, app.isHost);
-      if (!app.isHost && app.ping !== undefined) {
-        const g = renderer.g;
-        g.font = '11px system-ui'; g.textAlign = 'center'; g.fillStyle = 'rgba(255,255,255,.5)';
-        g.fillText(`Ping ${app.ping} ms`, renderer.W / 2, 14);
-        g.textAlign = 'left';
-      }
+      const view = app.isHost ? app.snap : viewSnap();
+      renderer.onEvents(evs, view, app.myId, sfx);
+      if (renderer3d) renderer3d.onEvents(evs, app.myId, view);
+      if (app.view === '3d') renderer3d.draw(view, app.myId, input, dt);
+      renderer.draw(view, app.myId, input, dt, true);
+      // Bildrate und Verbindung oben in der Mitte
+      fpsN++; fpsT += (now - (loop.prev || now)) / 1000; loop.prev = now;
+      if (fpsT >= 1) { fps = Math.round(fpsN / fpsT); fpsN = 0; fpsT = 0; }
+      const g = renderer.g;
+      g.font = '11px system-ui'; g.textAlign = 'center';
+      g.fillStyle = fps < 40 ? 'rgba(255,120,120,.8)' : 'rgba(255,255,255,.5)';
+      g.fillText(`${fps} FPS` + (!app.isHost && app.ping !== undefined ? ` · Ping ${app.ping} ms` : '') + (renderer3d && app.view === '3d' && renderer3d.pr < 1.5 ? ` · Qualität ${Math.round(renderer3d.pr / 1.5 * 100)} %` : ''), renderer.W / 2, 14);
+      g.textAlign = 'left';
       if (app.snap.ph === 'over') showOver(app.snap);
     }
   }
