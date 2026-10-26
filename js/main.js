@@ -197,6 +197,36 @@ function pickClass(cls) {
   renderLobby();
 }
 
+// ---------- Ansicht 2D / 3D ----------
+let renderer3d = null, threeLoading = false;
+app.view = '2d';
+
+function toggleView() {
+  if (app.view === '3d') { setView('2d'); return; }
+  if (window.THREE) { setView('3d'); return; }
+  if (threeLoading) return;
+  threeLoading = true;
+  if (renderer) renderer.msg('Lade 3D …', '#7fd4ff', 3);
+  const s = document.createElement('script');
+  s.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
+  s.onload = () => { threeLoading = false; setView('3d'); };
+  s.onerror = () => { threeLoading = false; if (renderer) renderer.msg('3D konnte nicht geladen werden', '#f66', 3); };
+  document.head.appendChild(s);
+}
+
+function setView(v) {
+  if (v === '3d' && !renderer3d) {
+    try { renderer3d = new Renderer3D($('cv3'), renderer); }
+    catch (e) { renderer.msg('3D wird nicht unterstützt', '#f66', 3); return; }
+    renderer3d.resize();
+  }
+  app.view = v;
+  $('cv3').style.display = v === '3d' ? 'block' : 'none';
+  renderer.hudOnly = v === '3d';
+  input.setFps(v === '3d');
+}
+input.onView = toggleView;
+
 // ---------- Spiel ----------
 function enterGame() {
   show('game');
@@ -237,11 +267,14 @@ function loop(now) {
     }
     if (app.snap) {
       renderer.onEvents(evs, app.snap, app.myId, sfx);
+      if (renderer3d) renderer3d.onEvents(evs, app.myId);
+      if (app.view === '3d') renderer3d.draw(app.snap, app.myId, input, dt);
       renderer.draw(app.snap, app.myId, input, dt, app.isHost);
       if (!app.isHost && app.ping !== undefined) {
         const g = renderer.g;
         g.font = '11px system-ui'; g.textAlign = 'center'; g.fillStyle = 'rgba(255,255,255,.5)';
         g.fillText(`Ping ${app.ping} ms`, renderer.W / 2, 14);
+        g.textAlign = 'left';
       }
       if (app.snap.ph === 'over') showOver(app.snap);
     }
@@ -254,7 +287,7 @@ async function keepAwake() {
   try { if (navigator.wakeLock) await navigator.wakeLock.request('screen'); } catch (e) {}
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && app.mode === 'game') keepAwake(); });
-addEventListener('resize', () => { if (renderer) renderer.resize(); });
+addEventListener('resize', () => { if (renderer) renderer.resize(); if (renderer3d) renderer3d.resize(); });
 
 $('btnHost').onclick = startHost;
 $('btnJoin').onclick = startJoin;

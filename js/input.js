@@ -13,6 +13,14 @@ class Input {
     this.playerScreen = { x: 0, y: 0 };
     this.touchUsed = false;
     this.R = 60;
+    this.fps = false;       // Ich-Perspektive
+    this.look = null;       // Touch zum Umsehen { id, lx }
+    this.fireTouch = null;  // Feuerknopf, kann gleichzeitig zum Umsehen gezogen werden
+    this.sens = 0.0085;
+    this.onView = null;
+    addEventListener('mousemove', e => {
+      if (this.fps && document.pointerLockElement === canvas) this.state.a += e.movementX * 0.0025;
+    });
 
     const o = { passive: false };
     canvas.addEventListener('touchstart', e => this.touchStart(e), o);
@@ -23,10 +31,13 @@ class Input {
     addEventListener('keyup', e => this.key(e, false));
     canvas.addEventListener('mousemove', e => { this.mouse = { x: e.clientX, y: e.clientY }; });
     canvas.addEventListener('mousedown', e => {
+      if (this.fps && document.pointerLockElement === canvas) { if (e.button === 0) this.mouseDown = true; return; }
       this.mouse = { x: e.clientX, y: e.clientY };
       const b = this.hitButton(e.clientX, e.clientY);
       if (b) this.pressButton(b);
-      else if (e.button === 0) this.mouseDown = true;
+      else if (this.fps && document.pointerLockElement !== canvas) {
+        try { canvas.requestPointerLock(); } catch (err) {}
+      } else if (e.button === 0) this.mouseDown = true;
     });
     addEventListener('mouseup', () => { this.mouseDown = false; this.state.useHeld = !!this.keys.e; });
     canvas.addEventListener('contextmenu', e => e.preventDefault());
@@ -47,6 +58,15 @@ class Input {
     else if (name === 'abil') s.abil++;
     else if (name === 'weapon') s.swap++;
     else if (name === 'reload') s.reload++;
+    else if (name === 'view' && this.onView) this.onView();
+  }
+
+  setFps(on) {
+    this.fps = on;
+    this.move = this.aim = this.look = this.fireTouch = null;
+    this.state.fire = false;
+    this.mouseDown = false;
+    if (!on && document.pointerLockElement) document.exitPointerLock();
   }
 
   touchStart(e) {
@@ -54,9 +74,11 @@ class Input {
     this.touchUsed = true;
     for (const t of e.changedTouches) {
       const b = this.hitButton(t.clientX, t.clientY);
+      if (b === 'fire') { this.fireTouch = { id: t.identifier, lx: t.clientX }; this.held[t.identifier] = b; continue; }
       if (b) { this.held[t.identifier] = b; this.pressButton(b); continue; }
       const st = { id: t.identifier, ox: t.clientX, oy: t.clientY, x: t.clientX, y: t.clientY };
       if (t.clientX < innerWidth / 2) { if (!this.move) this.move = st; }
+      else if (this.fps) { if (!this.look) this.look = { id: t.identifier, lx: t.clientX }; }
       else if (!this.aim) this.aim = st;
     }
     this.update();
@@ -68,6 +90,9 @@ class Input {
       for (const st of [this.move, this.aim]) {
         if (st && st.id === t.identifier) { st.x = t.clientX; st.y = t.clientY; }
       }
+      for (const lk of [this.look, this.fireTouch]) {
+        if (lk && lk.id === t.identifier) { this.state.a += (t.clientX - lk.lx) * this.sens; lk.lx = t.clientX; }
+      }
     }
     this.update();
   }
@@ -78,6 +103,8 @@ class Input {
       delete this.held[t.identifier];
       if (this.move && this.move.id === t.identifier) this.move = null;
       if (this.aim && this.aim.id === t.identifier) this.aim = null;
+      if (this.look && this.look.id === t.identifier) this.look = null;
+      if (this.fireTouch && this.fireTouch.id === t.identifier) this.fireTouch = null;
     }
     this.update();
   }
@@ -89,6 +116,7 @@ class Input {
       if (k === 'q') this.state.abil++;
       if (k === '1' || k === '2' || k === 'tab') this.state.swap++;
       if (k === 'r') this.state.reload++;
+      if (k === 'v' && this.onView) this.onView();
     }
     this.keys[k] = down;
     if (k === 'tab') e.preventDefault();
@@ -120,6 +148,14 @@ class Input {
       const l = Math.hypot(dx, dy) || 1;
       s.mx = dx / l; s.my = dy / l;
     }
+    // Ich-Perspektive: Bewegung relativ zur Blickrichtung
+    if (this.fps) {
+      const fwd = -s.my, side = s.mx, a = s.a;
+      s.mx = Math.cos(a) * fwd - Math.sin(a) * side;
+      s.my = Math.sin(a) * fwd + Math.cos(a) * side;
+      s.fire = this.touchUsed ? !!this.fireTouch : this.mouseDown;
+      return;
+    }
     if (this.aim) {
       const v = this.stickVec(this.aim);
       if (v.len > 0.15) s.a = Math.atan2(v.y, v.x);
@@ -131,7 +167,7 @@ class Input {
 
   // Jedes Bild: Mausrichtung relativ zur eigenen Figur
   frame() {
-    if (!this.aim && this.mouse && !this.touchUsed) {
+    if (!this.fps && !this.aim && this.mouse && !this.touchUsed) {
       this.state.a = Math.atan2(this.mouse.y - this.playerScreen.y, this.mouse.x - this.playerScreen.x);
     }
     this.update();

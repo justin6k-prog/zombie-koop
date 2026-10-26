@@ -35,7 +35,8 @@
   .cls span { font-size: 12px; color: #bbb; }
   .cls.sel { border-color: #ffd34d; background: rgba(255,211,77,.12); }
   #game { position: fixed; inset: 0; display: none; }
-  canvas { display: block; width: 100%; height: 100%; }
+  canvas { display: block; width: 100%; height: 100%; position: absolute; inset: 0; }
+  #cv3 { display: none; }
   #over { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: rgba(0,0,0,.75); text-align: center; }
   #over table { margin: 10px auto 0; border-collapse: collapse; }
   #over td, #over th { padding: 4px 14px; }
@@ -72,6 +73,7 @@
 </div>
 
 <div id="game">
+  <canvas id="cv3"></canvas>
   <canvas id="cv"></canvas>
   <div id="over">
     <h1>SPIEL VORBEI</h1>
@@ -83,12 +85,13 @@
 <div id="rotate">Bitte das Handy quer halten 📱↻</div>
 
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-<script src="js/config.js?v=2"></script>
-<script src="js/map.js?v=2"></script>
-<script src="js/sim.js?v=2"></script>
-<script src="js/audio.js?v=2"></script>
-<script src="js/input.js?v=2"></script>
-<script src="js/render.js?v=2"></script>
-<script src="js/main.js?v=2"></script>
+<script src="js/config.js?v=3"></script>
+<script src="js/map.js?v=3"></script>
+<script src="js/sim.js?v=3"></script>
+<script src="js/audio.js?v=3"></script>
+<script src="js/input.js?v=3"></script>
+<script src="js/render.js?v=3"></script>
+<script src="js/render3d.js?v=3"></script>
+<script src="js/main.js?v=3"></script>
 </body>
 </html>

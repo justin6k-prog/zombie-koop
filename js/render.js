@@ -336,6 +336,15 @@ class Renderer {
       return s;
     };
 
+    // 3D-Ansicht: hier nur die Anzeigen über das 3D-Bild legen
+    if (this.hudOnly) {
+      g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      g.clearRect(0, 0, W, H);
+      this.updateFx(dt);
+      this.drawHud(g, snap, me, input);
+      return;
+    }
+
     // Kamera folgt der eigenen Figur, leicht in Blickrichtung
     if (me) {
       const s = sm('p' + me.id, me.x, me.y);
@@ -745,6 +754,60 @@ class Renderer {
     for (const k in this.smooth) if (this.time - this.smooth[k].seen > 1) delete this.smooth[k];
   }
 
+  // ---------- Zusatzanzeigen in 3D: Fadenkreuz, Feuerknopf, Übersichtskarte ----------
+  drawFpsHud(g, snap, me, input, touch) {
+    const W = this.W, H = this.H;
+    // Fadenkreuz
+    if (me && me.s === 0) {
+      const gap = input.state.fire ? 9 : 6;
+      g.strokeStyle = 'rgba(255,255,255,.85)'; g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(W / 2 - gap - 8, H / 2); g.lineTo(W / 2 - gap, H / 2);
+      g.moveTo(W / 2 + gap, H / 2); g.lineTo(W / 2 + gap + 8, H / 2);
+      g.moveTo(W / 2, H / 2 - gap - 8); g.lineTo(W / 2, H / 2 - gap);
+      g.moveTo(W / 2, H / 2 + gap); g.lineTo(W / 2, H / 2 + gap + 8);
+      g.stroke();
+    }
+    // Feuerknopf (nur Touch)
+    if (touch && me && me.s === 0) {
+      const fb = { x: W - 120, y: H - 95, r: 46 };
+      input.buttons.fire = fb;
+      g.fillStyle = input.state.fire ? 'rgba(230,60,40,.85)' : 'rgba(200,40,30,.55)';
+      g.beginPath(); g.arc(fb.x, fb.y, fb.r, 0, TAU); g.fill();
+      g.strokeStyle = '#f88'; g.lineWidth = 2; g.stroke();
+      g.fillStyle = '#fff'; g.font = `bold 14px ${FONT}`; g.textAlign = 'center';
+      g.fillText('FEUER', fb.x, fb.y + 5);
+    } else input.buttons.fire = null;
+    // Übersichtskarte: Ausschnitt um den Spieler, Blick nach oben
+    if (me) {
+      // links unter der Spielerliste
+      const R = Math.min(62, H * 0.16), cx = 10 + R, cy = 14 + 26 * snap.pl.length + 34 + R;
+      const scale = 0.12, a = (me.s === 0 ? input.state.a : me.a);
+      g.save();
+      g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.clip();
+      g.fillStyle = '#000'; g.fillRect(cx - R, cy - R, R * 2, R * 2);
+      g.translate(cx, cy); g.rotate(-a - Math.PI / 2); g.scale(scale, scale); g.translate(-me.x, -me.y);
+      g.globalAlpha = 0.85;
+      g.drawImage(this.floor, 0, 0);
+      g.globalAlpha = 1;
+      this.map.doors.forEach((d, i) => { if (!snap.doors[i]) { g.fillStyle = '#7a828b'; g.fillRect(d.rect.x, d.rect.y, d.rect.w, d.rect.h); } });
+      const zs = snap.z;
+      g.fillStyle = '#f33';
+      for (let i = 0; i < zs.length; i += 7) { g.beginPath(); g.arc(zs[i + 2], zs[i + 3], 22, 0, TAU); g.fill(); }
+      g.fillStyle = '#ffd34d';
+      for (const [x, y] of snap.parts) { g.beginPath(); g.arc(x, y, 20, 0, TAU); g.fill(); }
+      for (const p of snap.pl) {
+        if (p.s === 2 || p.id === me.id) continue;
+        g.fillStyle = CLASSES[p.c].color; g.beginPath(); g.arc(p.x, p.y, 28, 0, TAU); g.fill();
+      }
+      g.restore();
+      g.strokeStyle = 'rgba(255,255,255,.5)'; g.lineWidth = 2;
+      g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.stroke();
+      g.fillStyle = '#fff';
+      g.beginPath(); g.moveTo(cx, cy - 7); g.lineTo(cx - 5, cy + 5); g.lineTo(cx + 5, cy + 5); g.closePath(); g.fill();
+    }
+  }
+
   // ---------- Anzeige (HUD) ----------
   drawHud(g, snap, me, input) {
     const W = this.W, H = this.H, touch = input.touchUsed;
@@ -868,6 +931,18 @@ class Renderer {
       if (!touch) { g.fillStyle = '#aaa'; g.fillText('Q', abilB.x, abilB.y + abilB.r + 12); }
     }
 
+    // Umschalten 2D / 3D
+    const vb = { x: W / 2 - 34, y: 22, w: 68, h: 28 };
+    input.buttons.view = vb;
+    g.fillStyle = 'rgba(0,0,0,.55)'; roundRect(g, vb.x, vb.y, vb.w, vb.h, 8); g.fill();
+    g.strokeStyle = '#7fd4ff'; g.lineWidth = 1.5; g.stroke();
+    g.fillStyle = '#7fd4ff'; g.font = `bold 13px ${FONT}`; g.textAlign = 'center';
+    g.fillText(this.hudOnly ? '2D' : '3D', W / 2, vb.y + 19);
+    if (!touch) { g.font = `10px ${FONT}`; g.fillStyle = '#888'; g.fillText('V', W / 2, vb.y + vb.h + 11); }
+
+    if (this.hudOnly) this.drawFpsHud(g, snap, me, input, touch);
+    else input.buttons.fire = null;
+
     // Joysticks
     for (const st of [input.move, input.aim]) {
       if (!st) continue;
@@ -877,7 +952,11 @@ class Renderer {
       g.fillStyle = st === input.aim && input.state.fire ? 'rgba(255,90,60,.6)' : 'rgba(255,255,255,.45)';
       g.beginPath(); g.arc(st.ox + dx * f, st.oy + dy * f, 24, 0, TAU); g.fill();
     }
-    if (touch && !input.move && !input.aim && snap.r <= 1 && snap.ph !== 'active') {
+    if (touch && this.hudOnly && !input.move && !input.look && snap.r <= 1 && snap.ph !== 'active') {
+      g.fillStyle = 'rgba(255,255,255,.5)'; g.font = `bold 13px ${FONT}`; g.textAlign = 'center';
+      g.fillText('Links: laufen', W * 0.25, H - 40);
+      g.fillText('Rechts wischen: umsehen · Roter Knopf: schießen', W * 0.68, H - 40);
+    } else if (touch && !this.hudOnly && !input.move && !input.aim && snap.r <= 1 && snap.ph !== 'active') {
       g.fillStyle = 'rgba(255,255,255,.5)'; g.font = `bold 13px ${FONT}`; g.textAlign = 'center';
       g.fillText('Links: laufen', W * 0.25, H - 40);
       g.fillText('Rechts ziehen: zielen + schießen', W * 0.75, H - 40);
