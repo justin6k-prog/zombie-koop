@@ -9,7 +9,19 @@ const app = {
   lobbyView: [],      // Anzeige der Lobby
   game: null, snap: null, evQueue: [], netEv: [],
   lastSeen: {}, hostSeen: 0, hostLost: false,
+  dropped: {},        // Host: kurz weg gewesene Spieler, Schlüssel -> { id, cls, t }
+  reconnecting: false, reconnectStart: 0, retryT: 0,
 };
+
+// Fester Schlüssel pro Gerät, damit man nach einem Abbruch seine Figur zurückbekommt
+app.key = (() => {
+  const make = () => Math.random().toString(36).slice(2, 10);
+  try {
+    let k = sessionStorage.getItem('zk-key');
+    if (!k) { k = make(); sessionStorage.setItem('zk-key', k); }
+    return k;
+  } catch (e) { return make(); }
+})();
 
 const sfx = new Sfx();
 const cv = $('cv');
@@ -55,7 +67,15 @@ function startHost() {
     conn.on('data', d => {
       app.lastSeen[conn.peer] = performance.now();
       if (d.t === 'in' && app.game) app.game.setInput(conn.peer, d.i);
-      else if (d.t === 'cls') {
+      else if (d.t === 'hello') {
+        conn.key = d.key;
+        // alte Verbindung desselben Geräts, die der Host noch für offen hält, zuerst abräumen
+        for (const c of app.conns.slice()) if (c !== conn && c.key === d.key) { c.close(); dropConn(c); }
+        rejoin(conn);
+        const p = app.lobby.find(x => x.id === conn.peer);
+        if (p && CLASSES[d.cls] && !app.game) p.cls = d.cls;
+        if (!app.game) sendLobby();
+      } else if (d.t === 'cls') {
         const p = app.lobby.find(x => x.id === conn.peer);
         if (p && CLASSES[d.cls]) p.cls = d.cls;
         if (!app.game) sendLobby();
@@ -63,6 +83,8 @@ function startHost() {
     });
     conn.on('close', () => dropConn(conn));
   });
+  // Verbindung zur Vermittlung verloren (z. B. Bildschirm kurz aus): neu anmelden
+  app.peer.on('disconnected', () => { try { app.peer.reconnect(); } catch (e) {} });
   app.peer.on('error', e => {
     if (e.type === 'unavailable-id') { app.peer.destroy(); startHost(); return; }
     status('Fehler: ' + e.type);
@@ -70,12 +92,42 @@ function startHost() {
 }
 
 function dropConn(conn) {
+  if (!app.conns.includes(conn)) return;
   app.conns = app.conns.filter(c => c !== conn);
+  const le = app.lobby.find(p => p.id === conn.peer);
   app.lobby = app.lobby.filter(p => p.id !== conn.peer);
   delete app.lastSeen[conn.peer];
-  if (app.game) app.game.removePlayer(conn.peer);
+  if (app.game && conn.key && app.game.players[conn.peer]) {
+    // Figur 60 Sek. aufheben, falls das Gerät sich neu verbindet
+    app.dropped[conn.key] = { id: conn.peer, cls: le ? le.cls : 'soldat', t: performance.now() };
+  } else if (app.game) app.game.removePlayer(conn.peer);
   if (!app.game) sendLobby();
 }
+
+// Gerät kommt nach Abbruch zurück: alte Figur übernehmen
+function rejoin(conn) {
+  const old = app.dropped[conn.key];
+  if (!old) return;
+  delete app.dropped[conn.key];
+  const le = app.lobby.find(p => p.id === conn.peer);
+  if (le) le.cls = old.cls;
+  const g = app.game;
+  if (!g || !g.players[old.id]) return;
+  g.removePlayer(conn.peer);
+  const p = g.players[old.id];
+  delete g.players[old.id];
+  p.id = conn.peer;
+  g.players[conn.peer] = p;
+}
+
+setInterval(() => {
+  const now = performance.now();
+  for (const [key, d] of Object.entries(app.dropped)) {
+    if (now - d.t < 60000) continue;
+    if (app.game) app.game.removePlayer(d.id);
+    delete app.dropped[key];
+  }
+}, 5000);
 
 function broadcast(msg) {
   for (const c of app.conns) if (c.open) c.send(msg);
@@ -91,11 +143,17 @@ function sendLobby() {
   if (app.mode === 'lobby') renderLobby();
 }
 
+// Wie lange ein Gerät stumm sein darf, bevor es als weg gilt (z. B. beim ersten Laden von 3D)
+const NET_TIMEOUT = 8000;
+let hostTick = performance.now();
 setInterval(() => {
   if (!app.isHost || !app.peer) return;
-  // Wer 3 Sek. nichts schickt, ist weg (PeerJS meldet das nicht zuverlässig)
   const now = performance.now();
-  for (const c of app.conns.slice()) if (now - (app.lastSeen[c.peer] || now) > 3000) { c.close(); dropConn(c); }
+  // Hing der Host selbst, zählt die Pause nicht gegen die Mitspieler
+  if (now - hostTick > 2000) for (const k in app.lastSeen) app.lastSeen[k] = now;
+  hostTick = now;
+  // Wer zu lange nichts schickt, ist weg (PeerJS meldet das nicht zuverlässig)
+  for (const c of app.conns.slice()) if (now - (app.lastSeen[c.peer] || now) > NET_TIMEOUT) { c.close(); dropConn(c); }
   if (!app.game) sendLobby();
 }, 1000);
 
@@ -126,17 +184,27 @@ function startJoin() {
   app.code = $('code').value.trim().toUpperCase();
   if (app.code.length !== 4) { status('Bitte 4-stelligen Code eingeben'); return; }
   status('Verbinde …');
-  app.peer = new Peer();
-  app.peer.on('open', id => {
+  connectToHost();
+}
+
+function connectToHost() {
+  if (app.peer) { try { app.peer.destroy(); } catch (e) {} }
+  const peer = app.peer = new Peer();
+  peer.on('open', id => {
+    if (peer !== app.peer) return;
     app.myId = id;
-    const conn = app.hostConn = app.peer.connect(PREFIX + app.code, { reliable: false, serialization: 'json' });
-    const timeout = setTimeout(() => status('Keine Verbindung zum Host. Gleiches WLAN/Hotspot?'), 10000);
+    const conn = app.hostConn = peer.connect(PREFIX + app.code, { reliable: false, serialization: 'json' });
+    const timeout = setTimeout(() => { if (!app.reconnecting) status('Keine Verbindung zum Host. Gleiches WLAN/Hotspot?'); }, 10000);
     conn.on('open', () => {
       clearTimeout(timeout);
       app.hostSeen = performance.now();
-      conn.send({ t: 'cls', cls: app.cls });
+      app.hostLost = false;
+      if (app.reconnecting && renderer) renderer.msg('Wieder verbunden', '#6f6', 2);
+      app.reconnecting = false;
+      conn.send({ t: 'hello', key: app.key, cls: app.cls });
     });
     conn.on('data', d => {
+      if (conn !== app.hostConn) return;
       app.hostSeen = performance.now();
       if (d.t === 'lobby') {
         app.lobbyView = d.pl;
@@ -147,16 +215,23 @@ function startJoin() {
         if (d.ev.length) app.evQueue.push(...d.ev);
       } else if (d.t === 'pong') app.ping = Math.round(performance.now() - d.ts);
     });
-    conn.on('close', hostGone);
+    conn.on('close', () => { if (conn === app.hostConn) hostGone(); });
   });
-  app.peer.on('error', e => status(e.type === 'peer-unavailable' ? 'Code nicht gefunden' : 'Fehler: ' + e.type));
+  peer.on('error', e => {
+    if (app.reconnecting) return;
+    status(e.type === 'peer-unavailable' ? 'Code nicht gefunden' : 'Fehler: ' + e.type);
+  });
 }
 
+// Verbindung weg: im Menü Fehler zeigen, sonst automatisch neu verbinden
 function hostGone() {
   if (app.hostLost) return;
   app.hostLost = true;
-  alert('Verbindung zum Host verloren');
-  location.reload();
+  if (app.mode === 'menu') { status('Verbindung verloren'); return; }
+  app.reconnecting = true;
+  app.reconnectStart = app.retryT = performance.now();
+  if (renderer) renderer.msg('Verbindung weg – verbinde neu …', '#f66', 4);
+  connectToHost();
 }
 
 // Eingaben 30x pro Sekunde an den Host, dazu Lebenszeichen
@@ -166,10 +241,25 @@ setInterval(() => {
   if (app.mode === 'game') c.send({ t: 'in', i: input.packet() });
   else c.send({ t: 'cls', cls: app.cls });
 }, 33);
+let clientTick = performance.now();
 setInterval(() => {
-  const c = app.hostConn;
-  if (c && c.open) c.send({ t: 'ping', ts: performance.now() });
-  if (app.hostSeen && !app.hostLost && performance.now() - app.hostSeen > 4000) hostGone();
+  const c = app.hostConn, now = performance.now();
+  // Hing dieses Gerät selbst, zählt die Pause nicht
+  if (now - clientTick > 2000 && app.hostSeen) app.hostSeen = now;
+  clientTick = now;
+  if (c && c.open) c.send({ t: 'ping', ts: now });
+  if (app.hostSeen && !app.hostLost && now - app.hostSeen > NET_TIMEOUT) hostGone();
+  if (app.reconnecting) {
+    if (now - app.reconnectStart > 30000) {
+      app.reconnecting = false;
+      alert('Verbindung zum Host verloren');
+      location.reload();
+    } else if (now - app.retryT > 4000) {
+      app.retryT = now;
+      if (renderer) renderer.msg('Verbinde neu …', '#f66', 3);
+      connectToHost();
+    }
+  }
 }, 1000);
 
 // ---------- Lobby ----------
@@ -202,6 +292,7 @@ let renderer3d = null, threeLoading = false;
 app.view = '2d';
 
 function toggleView() {
+  if (app.mode !== 'game' || !renderer) return;
   if (app.view === '3d') { setView('2d'); return; }
   if (window.THREE) { setView('3d'); return; }
   if (threeLoading) return;

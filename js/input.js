@@ -110,6 +110,8 @@ class Input {
   }
 
   key(e, down) {
+    // Tippen im Code-Feld ist keine Spielsteuerung
+    if (e.target && e.target.tagName === 'INPUT') return;
     const k = e.key.toLowerCase();
     if (down && !this.keys[k]) {
       if (k === 'e' || k === 'f') this.state.use++;
