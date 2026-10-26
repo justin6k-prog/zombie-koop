@@ -18,6 +18,9 @@ class Input {
     this.fireTouch = null;  // Feuerknopf, kann gleichzeitig zum Umsehen gezogen werden
     this.sens = 0.0085;
     this.onView = null;
+    this.onBag = null;
+    this.cmds = [];         // Befehle, bis der Host sie bestätigt hat
+    this.cmdN = 0;
     addEventListener('mousemove', e => {
       if (this.fps && document.pointerLockElement === canvas) this.state.a += e.movementX * 0.0025;
     });
@@ -59,7 +62,14 @@ class Input {
     else if (name === 'weapon') s.swap++;
     else if (name === 'reload') s.reload++;
     else if (name === 'view' && this.onView) this.onView();
+    else if (name === 'bag' && this.onBag) this.onBag();
+    else if (name === 'qmed') this.cmd({ op: 'quick', k: 'medkit' });
+    else if (name === 'qgren') this.cmd({ op: 'quick', k: 'grenade' });
   }
+
+  // Inventar-/Fähigkeiten-Befehl; wird wiederholt mitgeschickt, bis der Host ihn bestätigt
+  cmd(c) { c.n = ++this.cmdN; this.cmds.push(c); }
+  ack(n) { if (this.cmds.length && this.cmds[0].n <= n) this.cmds = this.cmds.filter(c => c.n > n); }
 
   setFps(on) {
     this.fps = on;
@@ -119,6 +129,9 @@ class Input {
       if (k === '1' || k === '2' || k === 'tab') this.state.swap++;
       if (k === 'r') this.state.reload++;
       if (k === 'v' && this.onView) this.onView();
+      if ((k === 'i' || k === 'b' || k === 'k') && this.onBag) this.onBag(k === 'k' ? 'skills' : 'inv');
+      if (k === 'h') this.cmd({ op: 'quick', k: 'medkit' });
+      if (k === 'g') this.cmd({ op: 'quick', k: 'grenade' });
     }
     this.keys[k] = down;
     if (k === 'tab') e.preventDefault();
@@ -177,6 +190,8 @@ class Input {
 
   packet() {
     const s = this.state;
-    return { mx: +s.mx.toFixed(2), my: +s.my.toFixed(2), a: +s.a.toFixed(3), fire: s.fire, use: s.use, useHeld: s.useHeld, abil: s.abil, swap: s.swap, reload: s.reload };
+    const p = { mx: +s.mx.toFixed(2), my: +s.my.toFixed(2), a: +s.a.toFixed(3), fire: s.fire, use: s.use, useHeld: s.useHeld, abil: s.abil, swap: s.swap, reload: s.reload };
+    if (this.cmds.length) p.cm = this.cmds;
+    return p;
   }
 }

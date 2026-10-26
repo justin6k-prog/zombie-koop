@@ -102,29 +102,12 @@ class Renderer3D {
       upMetal: L(0x3c2a5a, 0x1c0c34), plasmaBody: L(0x24322a, 0x08100a), skin: L(0xb08060, 0x1a1008), glove: L(0x262626, 0x0a0a0a),
       gore: L(0x6a0a0a, 0x200000), bone: L(0xd8d0b8, 0x202018),
     };
-    // Zombie-Haut: fleckig mit Blut
-    this.zSkin = canvasTex(64, 64, (g, w, h) => {
-      g.fillStyle = '#66704e'; g.fillRect(0, 0, w, h);
-      speckle(g, 0, 0, w, h, 200, ['#5e6847', '#717c58', '#555e40', '#4a5238', '#6b6a4a'], 0.8, 2.5);
-      speckle(g, 0, 0, w, h, 8, ['rgba(80,6,6,.8)', 'rgba(50,4,4,.85)'], 1.2, 3.5);
-      g.strokeStyle = 'rgba(60,5,5,.7)'; g.lineWidth = 1.5;
-      for (let i = 0; i < 3; i++) { const x = Math.random() * w; g.beginPath(); g.moveTo(x, Math.random() * 20); g.lineTo(x + rnd(-6, 6), 30 + Math.random() * 30); g.stroke(); }
+    // Hautdetail (hell, wenige Blutflecken); wird mit den Farben der Körperteile multipliziert
+    this.zDetail = canvasTex(64, 64, (g, w, h) => {
+      g.fillStyle = '#e8e8e8'; g.fillRect(0, 0, w, h);
+      speckle(g, 0, 0, w, h, 220, ['#d0d0d0', '#f4f4f4', '#c4c4c4', '#dadada'], 0.8, 2.2);
+      speckle(g, 0, 0, w, h, 7, ['rgba(140,10,10,.85)', 'rgba(100,5,5,.85)'], 1.2, 3.5);
     });
-    // Gesicht vorne: dunkle Augenhöhlen, blutiger Mund
-    this.zFace = canvasTex(64, 64, (g, w, h) => {
-      g.drawImage(this.zSkin.image, 0, 0);
-      g.fillStyle = '#1a1410'; g.fillRect(12, 18, 14, 10); g.fillRect(38, 18, 14, 10);
-      g.fillStyle = '#3a0606'; g.fillRect(16, 42, 32, 10);
-      g.fillStyle = '#d8d0b0'; for (let x = 18; x < 46; x += 5) g.fillRect(x, 42, 3, 4);
-      g.fillStyle = 'rgba(120,10,10,.9)'; g.fillRect(20, 52, 6, 12); g.fillRect(34, 52, 4, 9);
-    });
-    // zerrissene Kleidung je Zombie-Typ
-    this.zCloth = ZTYPES.map(t => canvasTex(64, 64, (g, w, h) => {
-      g.fillStyle = t.color; g.fillRect(0, 0, w, h);
-      speckle(g, 0, 0, w, h, 120, ['rgba(0,0,0,.25)', 'rgba(255,255,255,.08)'], 1, 3);
-      speckle(g, 0, 0, w, h, 6, ['rgba(80,6,6,.8)', 'rgba(50,4,4,.85)'], 2, 6);
-      g.fillStyle = '#66704e'; for (let i = 0; i < 4; i++) g.fillRect(Math.random() * 50, Math.random() * 50, 8 + Math.random() * 8, 5);
-    }));
   }
 
   // ---------- Welt aufbauen ----------
@@ -291,6 +274,8 @@ class Renderer3D {
     });
     this.puMeshes = [];
     this.turretMeshes = [];
+    this.lootMeshes = [];
+    this.grenMeshes = [];
   }
 
   label(text, color, bg = 'rgba(0,0,0,.65)') {
@@ -447,57 +432,161 @@ class Renderer3D {
     return g;
   }
 
-  // ---------- Figuren mit abnehmbaren Körperteilen ----------
-  makeZombie(type) {
-    const t = ZTYPES[type];
-    const skin = new THREE.MeshLambertMaterial({ map: this.zSkin, color: type === 3 ? 0xa080b0 : type === 1 ? 0xc09080 : 0xd8d8d8 });
-    const face = new THREE.MeshLambertMaterial({ map: this.zFace, color: skin.color });
-    const cloth = new THREE.MeshLambertMaterial({ map: this.zCloth[type] });
-    const pants = new THREE.MeshLambertMaterial({ color: 0x2f3328 });
-    return this.makeBody(skin, face, cloth, pants, type === 3 || type === 1 ? 0xff3b2f : 0xe8e070, t.r / 14 * (type === 3 ? 1.05 : 1));
+  // ---------- Figuren mit runden Körperformen und abnehmbaren Körperteilen ----------
+  // Jedes Körperteil ist ein einziges Modell (Formen zusammengefügt, Farben pro Ecke) – wenig Zeichenaufwand.
+  geoPart(list) {
+    const parts = list.map(([geo, color]) => {
+      const g = geo.index ? geo.toNonIndexed() : geo;
+      const c = new THREE.Color(color), n = g.attributes.position.count, col = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) { col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b; }
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      return g;
+    });
+    let total = 0;
+    for (const g of parts) total += g.attributes.position.count;
+    const pos = new Float32Array(total * 3), nor = new Float32Array(total * 3), uv = new Float32Array(total * 2), col = new Float32Array(total * 3);
+    let o = 0;
+    for (const g of parts) {
+      const n = g.attributes.position.count;
+      pos.set(g.attributes.position.array, o * 3); nor.set(g.attributes.normal.array, o * 3);
+      uv.set(g.attributes.uv.array, o * 2); col.set(g.attributes.color.array, o * 3);
+      o += n;
+    }
+    const out = new THREE.BufferGeometry();
+    out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+    out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    out.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    out.computeBoundingSphere();
+    return out;
   }
 
-  makeBody(skin, face, cloth, pants, eyeColor, scale) {
+  // Grundformen: Zylinder (aufrecht oder entlang x) und Kugeln, verschoben/gestreckt
+  cyl(rt, rb, h, x, y, z, opt = {}) {
+    const g = new THREE.CylinderGeometry(rt, rb, h, opt.seg || 8, 1);
+    if (opt.sx || opt.sz) g.scale(opt.sx || 1, 1, opt.sz || 1);
+    if (opt.alongX) g.rotateZ(-Math.PI / 2);
+    g.translate(x, y, z);
+    return g;
+  }
+  sph(r, x, y, z, sx = 1, sy = 1, sz = 1, seg = 8) {
+    const g = new THREE.SphereGeometry(r, seg, Math.max(5, seg - 3));
+    g.scale(sx, sy, sz); g.translate(x, y, z);
+    return g;
+  }
+
+  // Bauplan eines Körpers. col: skin, cloth, pants, shoe, eye, (helmet, vest, armorLegs, boots)
+  bodyGeos(col) {
+    const G = {};
+    const T = [  // Rumpf: Becken, Bauch, Brust, Schultern, Hals
+      [this.sph(7, 0, 0, 0, 0.78, 0.62, 1.05), col.pants],
+      [this.cyl(7.2, 7, 10, 0, 6, 0, { sx: 0.72 }), col.cloth],
+      [this.cyl(9.6, 7.4, 15, 0, 18, 0, { sx: 0.62 }), col.cloth],
+      [this.sph(3.8, 0, 24.5, -8.8), col.cloth], [this.sph(3.8, 0, 24.5, 8.8), col.cloth],
+      [this.cyl(2.4, 2.8, 5, 0.5, 28, 0), col.skin],
+    ];
+    if (col.vest) T.push([this.cyl(10.4, 8.2, 16, 0, 17, 0, { sx: 0.7 }), col.vest], [this.cyl(10.6, 10.6, 2, 0, 21, 0, { sx: 0.71 }), col.vestStripe]);
+    G.torso = this.geoPart(T);
+    const H = [  // Kopf mit Augenhöhlen, Kiefer, Mund
+      [this.sph(6.2, 0, 5.5, 0, 0.92, 1.12, 0.88, 10), col.skin],
+      [this.sph(1.4, 5.0, 6.6, -2.2, 0.6, 1, 1), 0x1a1210], [this.sph(1.4, 5.0, 6.6, 2.2, 0.6, 1, 1), 0x1a1210],
+      [new THREE.BoxGeometry(4.2, 2.6, 6.4).translate(3.4, 0.8, 0), col.jaw || col.skin],
+      [new THREE.BoxGeometry(1, 1.1, 4.2).translate(5.3, 1.8, 0), col.mouth || 0x401010],
+      [this.sph(1.0, 3, 4.2, 0, 1.4, 0.8, 0.8), col.skin],  // Nase
+    ];
+    if (col.eye) H.push([this.sph(0.75, 5.5, 6.6, -2.2), col.eye], [this.sph(0.75, 5.5, 6.6, 2.2), col.eye]);
+    if (col.helmet) H.push([this.sph(7, 0, 7.5, 0, 0.98, 0.8, 0.95, 10), col.helmet], [new THREE.BoxGeometry(2, 1.2, 12).translate(6.2, 6.5, 0), col.helmet]);
+    else if (col.hair) H.push([this.sph(6.3, -0.8, 7.5, 0, 0.9, 0.8, 0.9), col.hair]);
+    G.head = this.geoPart(H);
+    // Oberarm entlang x, Unterarm mit Hand
+    G.upper = this.geoPart([[this.cyl(2.8, 2.4, 13, 6.5, 0, 0, { alongX: true }), col.sleeve || col.cloth]]);
+    G.fore = this.geoPart([
+      [this.cyl(2.3, 1.9, 12, 6, 0, 0, { alongX: true }), col.forearm || col.skin],
+      [this.sph(2.5, 13.2, 0, 0, 1.3, 0.8, 1.05), col.hand || col.skin],
+      [this.sph(2.2, 0, 0, 0), col.forearm || col.skin],   // Ellbogen
+    ]);
+    // Oberschenkel nach unten, Unterschenkel mit Knie und Fuß
+    G.thigh = this.geoPart([[this.cyl(3.9, 3.1, 17, 0, -8.5, 0), col.legs || col.pants]]);
+    G.shin = this.geoPart([
+      [this.sph(3.1, 0, 0, 0), col.legs || col.pants],
+      [this.cyl(3.1, 2.4, 16, 0, -8, 0), col.legs || col.pants],
+      [this.sph(3.2, 2.2, -16.5, 0, 1.7, 0.7, 0.95), col.shoe],
+    ]);
+    return G;
+  }
+
+  makeBody(geos, mat, scale) {
     const root = new THREE.Group(), body = new THREE.Group();
     root.add(body);
-    const part = (name, x, y, z) => { const o = new THREE.Group(); o.position.set(x, y, z); o.name = name; body.add(o); return o; };
-    const mesh = (parent, w, h, d, mat, x, y, z) => {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); m.position.set(x, y, z); parent.add(m); return m;
-    };
-    const legL = part('legL', 0, 27, -5), legR = part('legR', 0, 27, 5);
-    mesh(legL, 7, 27, 7, pants, 0, -13.5, 0); mesh(legR, 7, 27, 7, pants, 0, -13.5, 0);
-    const torso = part('torso', 0, 27, 0);
-    mesh(torso, 11, 27, 19, cloth, 0, 13.5, 0);
-    const head = part('head', 1, 54, 0);
-    const hm = new THREE.Mesh(new THREE.BoxGeometry(12, 12, 12), [face, skin, skin, skin, skin, skin]);
-    hm.position.set(0, 6, 0); head.add(hm);
-    if (eyeColor) for (const z of [-3, 3]) mesh(head, 1, 2, 2, new THREE.MeshBasicMaterial({ color: eyeColor }), 6.2, 8, z);
-    const armL = part('armL', 0, 50, -12), armR = part('armR', 0, 50, 12);
-    for (const a of [armL, armR]) { mesh(a, 10, 6, 6, cloth, 5, 0, 0); mesh(a, 13, 5, 5, skin, 15.5, 0, 0); }
+    const grp = (parent, name, x, y, z) => { const o = new THREE.Group(); o.position.set(x, y, z); o.name = name; parent.add(o); return o; };
+    const mesh = (parent, geo) => { const m = new THREE.Mesh(geo, mat); parent.add(m); return m; };
+    const torso = grp(body, 'torso', 0, 36, 0); mesh(torso, geos.torso);
+    const head = grp(body, 'head', 1, 66, 0); mesh(head, geos.head);
+    const arms = [-9.8, 9.8].map(z => {
+      const a = grp(body, '', 0, 60.5, z); mesh(a, geos.upper);
+      const f = grp(a, '', 13, 0, 0); mesh(f, geos.fore);
+      a.userData.fore = f; return a;
+    });
+    const legs = [-4.6, 4.6].map(z => {
+      const l = grp(body, '', 0, 36, z); mesh(l, geos.thigh);
+      const s = grp(l, '', 0, -17, 0); mesh(s, geos.shin);
+      l.userData.shin = s; return l;
+    });
     root.scale.setScalar(scale);
-    root.userData = { body, legL, legR, torso, head, armL, armR, lost: {}, phase: Math.random() * 6, flinch: 0, lean: 0 };
+    root.userData = { body, torso, head, armL: arms[0], armR: arms[1], legL: legs[0], legR: legs[1], lost: {}, phase: Math.random() * 6, flinch: 0, lean: 0 };
     return root;
   }
 
-  playerMesh(cls, wid, up) {
-    const c = CLASSES[cls];
-    const helmet = cls === 'soldat' ? 0x4a6b35 : cls === 'tech' ? 0xe8c020 : 0xf2f2f2;
-    const L = col => new THREE.MeshLambertMaterial({ color: col });
-    const g = this.makeBody(this.M.skin, L(helmet), L(new THREE.Color(c.color).getHex()), L(0x2b2b30), null, 1);
+  // Zombie-Aussehen je Typ (Formen werden pro Typ nur einmal gebaut)
+  makeZombie(type) {
+    if (!this.zGeo) {
+      this.zMat = new THREE.MeshLambertMaterial({ vertexColors: true, map: this.zDetail });
+      const P = [
+        { skin: 0x7d8a62, cloth: 0x4a5560, pants: 0x34352c, shoe: 0x221d18, eye: 0xd8d070, jaw: 0x6a7552, mouth: 0x3a0a0a, hair: 0x2a2620, forearm: 0x768359 },
+        { skin: 0xa07a68, cloth: 0x6a3a30, pants: 0x2e2a28, shoe: 0x1c1816, eye: 0xff3b2f, jaw: 0x8a6656, mouth: 0x4a0808, hair: 0x3a2018 },
+        { skin: 0x6a7550, cloth: 0x3e4a32, pants: 0x2e3326, shoe: 0x1e1a14, eye: 0xd8d070, jaw: 0x5a6544, mouth: 0x300808 },
+        { skin: 0x7a5a80, cloth: 0x2a1a30, pants: 0x1e1622, shoe: 0x140f14, eye: 0xff2020, jaw: 0x5a3e60, mouth: 0x500000 },
+      ];
+      this.zGeo = P.map(c => this.bodyGeos(c));
+    }
+    const t = ZTYPES[type];
+    return this.makeBody(this.zGeo[type], this.zMat, t.r / 14 * (type === 3 ? 1.05 : type === 2 ? 1.05 : 1));
+  }
+
+  // Mitspieler: Klassenfarbe, angelegte Rüstung sichtbar (Helm, Weste, Hose, Stiefel)
+  playerMesh(p, wid, up) {
+    if (!this.pMat) this.pMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    const cls = new THREE.Color(CLASSES[p.c].color).multiplyScalar(0.75).getHex();
+    const tint = it => it ? [0x6a6a6a, 0x3a6aa8, 0x6a3a9a, 0xa8781e][it.r] : null;
+    const eq = p.eq || {};
+    const geos = this.bodyGeos({
+      skin: 0xc89070, cloth: cls, pants: 0x2b2b30, shoe: 0x1a1a1a, hair: 0x3a2a1a, mouth: 0x7a3a30, jaw: 0xc08868,
+      sleeve: cls, hand: 0x262626,
+      helmet: eq.head ? tint(eq.head) : null,
+      vest: eq.body ? 0x3a3d33 : null, vestStripe: eq.body ? tint(eq.body) : null,
+      legs: eq.legs ? new THREE.Color(tint(eq.legs)).multiplyScalar(0.55).getHex() : null,
+      shoe2: null,
+    });
+    if (eq.feet) geos.shin = this.geoPart([
+      [this.sph(3.1, 0, 0, 0), eq.legs ? new THREE.Color(tint(eq.legs)).multiplyScalar(0.55).getHex() : 0x2b2b30],
+      [this.cyl(3.1, 2.4, 16, 0, -8, 0), eq.legs ? new THREE.Color(tint(eq.legs)).multiplyScalar(0.55).getHex() : 0x2b2b30],
+      [this.cyl(3.2, 3.4, 6, 0, -14, 0), tint(eq.feet)],
+      [this.sph(3.4, 2.2, -16.5, 0, 1.75, 0.75, 1), tint(eq.feet)],
+    ]);
+    const g = this.makeBody(geos, this.pMat, 1);
     const gun = this.buildWeapon(wid, up);
     gun.scale.setScalar(0.5);
     gun.rotation.y = -Math.PI / 2;
-    gun.position.set(16, 46, 7);
+    gun.position.set(16, 47, 6);
     g.add(gun);
-    g.userData.gunId = wid + up;
     const tag = this.label('', '#fff');
-    tag.position.set(0, 84, 0);
+    tag.position.set(0, 86, 0);
     g.add(tag);
     g.userData.tag = tag;
     return g;
   }
 
-  // Laufen, Schlurfen, Angreifen, Zucken
+  // Laufen mit Knie- und Ellbogenbewegung, Schlurfen, Angreifen, Zucken
   animateBody(mesh, speed, dt, opt) {
     const u = mesh.userData;
     const amp = Math.min(1, speed / 60);
@@ -505,26 +594,34 @@ class Renderer3D {
     const sw = Math.sin(u.phase);
     u.flinch = Math.max(0, u.flinch - dt * 5);
     const limp = opt.zombie && !opt.runner ? 0.55 : 1;
-    u.legL.rotation.z = sw * 0.6 * amp;
-    u.legR.rotation.z = -sw * 0.6 * amp * limp;
+    u.legL.rotation.z = sw * 0.55 * amp;
+    u.legR.rotation.z = -sw * 0.55 * amp * limp;
+    // Knie beugen sich, wenn das Bein nach hinten schwingt
+    u.legL.userData.shin.rotation.z = -Math.max(0, -sw) * 0.9 * amp;
+    u.legR.userData.shin.rotation.z = -Math.max(0, sw) * 0.9 * amp * limp;
     const lean = opt.runner ? -0.38 : opt.zombie ? -0.14 : -0.04;
     u.lean += (lean * (opt.player ? amp : 1) - u.lean) * Math.min(1, dt * 5);
     u.body.rotation.z = u.lean + u.flinch * 0.45 + (opt.att ? -0.25 : 0);
     u.body.rotation.x = opt.zombie ? Math.sin(u.phase * 0.5) * 0.09 : 0;
     u.body.position.y = -Math.abs(Math.cos(u.phase)) * 1.5 * amp;
+    const fL = u.armL.userData.fore, fR = u.armR.userData.fore;
     if (opt.zombie) {
       if (opt.runner) {
-        u.armL.rotation.z = -1.0 + sw * 0.9; u.armR.rotation.z = -1.0 - sw * 0.9;
+        u.armL.rotation.z = -1.1 + sw * 0.8; u.armR.rotation.z = -1.1 - sw * 0.8;
+        fL.rotation.z = 1.2; fR.rotation.z = 1.2;
       } else {
-        const reach = opt.att ? 0.5 : 0.08;
+        // Arme nach vorne gestreckt, beim Angriff schlagen sie zu
+        const reach = opt.att ? 0.55 : 0.05;
         u.armL.rotation.z = reach + Math.sin(u.phase + 1) * 0.12; u.armR.rotation.z = reach - Math.sin(u.phase) * 0.12;
-        u.armL.rotation.y = 0.15; u.armR.rotation.y = -0.15;
+        u.armL.rotation.y = 0.12; u.armR.rotation.y = -0.12;
+        fL.rotation.z = opt.att ? -0.4 : -0.15; fR.rotation.z = opt.att ? -0.4 : -0.2;
       }
       u.head.rotation.x = Math.sin(this.time * 1.3 + u.phase * 0.1) * 0.3;
       u.head.rotation.z = -0.2 + u.flinch * 0.5;
     } else {
-      // Spieler halten die Waffe
-      u.armL.rotation.y = 0.5; u.armR.rotation.y = 0.2;
+      // Spieler halten die Waffe: Oberarm nach unten-vorne, Unterarm angewinkelt
+      u.armR.rotation.set(0, 0.35, -1.0); fR.rotation.z = 1.25;
+      u.armL.rotation.set(0, -0.65, -0.85); fL.rotation.z = 1.1;
     }
   }
 
@@ -863,7 +960,7 @@ class Renderer3D {
       if (Math.random() < (strong ? 0.3 : 0.1)) this.detach(mesh, Math.random() < 0.5 ? 'legL' : 'legR', e.ba, power);
     }
     this.corpses.push({ mesh, t: 0, slide: (strong ? 120 : 50) * (big ? 2 : 1), a: e.ba, fall: -Math.PI / 2 * (0.95 + Math.random() * 0.1) });
-    if (this.corpses.length > 22) { const c = this.corpses.shift(); this.scene.remove(c.mesh); }
+    if (this.corpses.length > 14) { const c = this.corpses.shift(); this.scene.remove(c.mesh); }
   }
 
   // Wird das Bild zu langsam, Auflösung schrittweise senken
@@ -999,6 +1096,42 @@ class Renderer3D {
       if (t) { g.position.set(t[0], 0, t[1]); g.userData.barrel.rotation.y = -t[2]; }
     });
 
+    // Beutel am Boden (Lichtstrahl ab „Selten“), Granaten
+    const lt = snap.lt || [];
+    while (this.lootMeshes.length < lt.length) {
+      const grp = new THREE.Group();
+      const sack = new THREE.Mesh(new THREE.SphereGeometry(6, 10, 8), new THREE.MeshLambertMaterial({ color: 0x6a5236, emissive: 0x1a1008 }));
+      sack.scale.set(1, 0.8, 1); sack.position.y = 5;
+      const band = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 3, 2.5, 8), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+      band.position.y = 10;
+      const beam = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 3, 90, 8, 1, true),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false }));
+      beam.position.y = 45;
+      grp.add(sack, band, beam); grp.userData = { band, beam };
+      this.scene.add(grp); this.lootMeshes.push(grp);
+    }
+    this.lootMeshes.forEach((m, i) => {
+      const l = lt[i];
+      m.visible = !!l;
+      if (!l) return;
+      const c = l[4] >= 0 ? RARITY[l[4]].color : CONSUMABLES[l[3]].color;
+      m.position.set(l[1], Math.sin(this.time * 3 + l[0]) * 1.5, l[2]);
+      m.rotation.y = this.time;
+      m.userData.band.material.color.set(c);
+      m.userData.beam.visible = l[4] >= 1;
+      m.userData.beam.material.color.set(c);
+    });
+    const gr = snap.gr || [];
+    while (this.grenMeshes.length < gr.length) {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(3, 8, 6), new THREE.MeshLambertMaterial({ color: 0x3a4228, emissive: 0x200000 }));
+      this.scene.add(m); this.grenMeshes.push(m);
+    }
+    this.grenMeshes.forEach((m, i) => {
+      const g = gr[i];
+      m.visible = !!g;
+      if (g) { m.position.set(g[0], 4, g[1]); m.material.emissive.setHex(Math.floor(this.time * 8) % 2 ? 0xaa0000 : 0x200000); }
+    });
+
     // Zombies
     const seen = new Set();
     const zs = snap.z;
@@ -1061,9 +1194,10 @@ class Renderer3D {
       if (p.id === myId || p.s === 2) continue;
       const sl = p.sl[p.cu] || ['pistol', 0];
       let mesh = this.pMeshes.get(p.id);
-      if (!mesh || mesh.userData.cls !== p.c || mesh.userData.gunId !== sl[0] + sl[1]) {
+      const eq = p.eq || {}, look = p.c + sl[0] + sl[1] + ['head', 'body', 'legs', 'feet'].map(k => eq[k] ? eq[k].r : '-').join('');
+      if (!mesh || mesh.userData.look !== look) {
         if (mesh) this.scene.remove(mesh);
-        mesh = this.playerMesh(p.c, sl[0], !!sl[1]); mesh.userData.cls = p.c;
+        mesh = this.playerMesh(p, sl[0], !!sl[1]); mesh.userData.look = look;
         this.scene.add(mesh); this.pMeshes.set(p.id, mesh);
       }
       pseen.add(p.id);

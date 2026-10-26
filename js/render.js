@@ -291,6 +291,21 @@ class Renderer {
         case 'swap': if (e.id === myId) sfx.play('swap', 0.8); break;
         case 'empty': if (e.id === myId) sfx.play('empty', 0.8); break;
         case 'over': sfx.play('over', 1); break;
+        case 'loot':
+          if (e.id === myId) {
+            const it = e.it;
+            this.msg(`+ ${it.k === 'armor' ? it.nm : CONSUMABLES[it.k].name}`, it.k === 'armor' ? RARITY[it.r].color : CONSUMABLES[it.k].color, 2);
+            sfx.play('part', 0.8);
+          }
+          break;
+        case 'full': if (e.id === myId) { this.msg('Rucksack voll', '#f88', 1.5); sfx.play('nomoney', 0.6); } break;
+        case 'skillpts': this.msg(`+${e.n} Fähigkeitspunkte! (🎒 oben)`, '#ffd34d', 4, true); sfx.play('powerup', 1); break;
+        case 'skill': if (e.id === myId) sfx.play('upgrade', 0.5); break;
+        case 'equip': if (e.id === myId) sfx.play('swap', 1); break;
+        case 'use':
+          sfx.play({ medkit: 'perk', grenade: 'knife', adrenaline: 'heart', ammobox: 'magIn' }[e.it] || 'buy', vol(e.x, e.y));
+          if (e.id === myId) this.msg(CONSUMABLES[e.it].name, CONSUMABLES[e.it].color, 1.2);
+          break;
       }
     }
   }
@@ -569,6 +584,23 @@ class Renderer {
       }
       g.fillStyle = '#fff'; g.font = `bold 9px ${FONT}`; g.fillText(CFG.BOX_COST, 0, 24);
       g.restore();
+    }
+
+    // Beutel (Farbe = Seltenheit bzw. Gegenstand)
+    for (const [id, x, y, k, r] of snap.lt || []) {
+      const c = r >= 0 ? RARITY[r].color : CONSUMABLES[k].color, b = Math.sin(t * 3 + id) * 2;
+      g.save(); g.translate(x, y + b);
+      if (r >= 1) { g.shadowColor = c; g.shadowBlur = 18; }
+      g.fillStyle = '#5a4630'; g.beginPath(); g.ellipse(0, 2, 11, 9, 0, 0, TAU); g.fill();
+      g.shadowBlur = 0;
+      g.strokeStyle = c; g.lineWidth = 3; g.stroke();
+      g.fillStyle = c; g.font = `bold 11px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(r >= 0 ? '⛨' : CONSUMABLES[k].icon, 0, 2);
+      g.restore();
+    }
+    for (const [x, y] of snap.gr || []) {
+      g.fillStyle = '#3a4228'; g.beginPath(); g.arc(x, y, 6, 0, TAU); g.fill();
+      g.fillStyle = Math.floor(t * 8) % 2 ? '#f33' : '#600'; g.beginPath(); g.arc(x, y, 2.5, 0, TAU); g.fill();
     }
 
     // Teile zum Aufsammeln
@@ -901,6 +933,9 @@ class Renderer {
       if (me.s === 0) {
         g.fillStyle = 'rgba(0,0,0,.55)'; g.fillRect(W / 2 - 80, H - 16, 160, 8);
         g.fillStyle = me.hp / me.mh < 0.35 ? '#e33' : '#5c5'; g.fillRect(W / 2 - 80, H - 16, 160 * me.hp / me.mh, 8);
+        g.font = `bold 11px ${FONT}`; g.textAlign = 'left'; g.fillStyle = '#9cf';
+        if (me.ar) g.fillText(`⛨ ${me.ar}`, W / 2 + 86, H - 8);
+        if (me.adr) { g.fillStyle = '#ffd23a'; g.fillText(`⚡ ${me.adr}s`, W / 2 + 130, H - 8); }
       }
     } else input.buttons.weapon = null;
 
@@ -956,6 +991,35 @@ class Renderer {
     g.fillStyle = '#7fd4ff'; g.font = `bold 13px ${FONT}`; g.textAlign = 'center';
     g.fillText(this.hudOnly ? '2D' : '3D', W / 2, vb.y + 19);
     if (!touch) { g.font = `10px ${FONT}`; g.fillStyle = '#888'; g.fillText('V', W / 2, vb.y + vb.h + 11); }
+
+    // Rucksack (Inventar + Fähigkeiten); Punkt zeigt freie Fähigkeitspunkte
+    const bb = { x: W / 2 + 42, y: 22, w: 44, h: 28 };
+    input.buttons.bag = bb;
+    g.fillStyle = 'rgba(0,0,0,.55)'; roundRect(g, bb.x, bb.y, bb.w, bb.h, 8); g.fill();
+    g.strokeStyle = '#ffd34d'; g.lineWidth = 1.5; g.stroke();
+    g.font = `16px ${FONT}`; g.textAlign = 'center'; g.fillStyle = '#fff';
+    g.fillText('🎒', bb.x + bb.w / 2, bb.y + 20);
+    if (me && me.spt) {
+      g.fillStyle = '#e33'; g.beginPath(); g.arc(bb.x + bb.w - 2, bb.y + 2, 9, 0, TAU); g.fill();
+      g.fillStyle = '#fff'; g.font = `bold 11px ${FONT}`; g.fillText(me.spt, bb.x + bb.w - 2, bb.y + 6);
+    }
+    if (!touch) { g.font = `10px ${FONT}`; g.fillStyle = '#888'; g.fillText('I / K', bb.x + bb.w / 2, bb.y + bb.h + 11); }
+    // Schnellknöpfe Verbandskasten / Granate
+    const quick = [['qmed', 'medkit', 'H'], ['qgren', 'grenade', 'G']];
+    let qx = W - 44 - 66;
+    for (const [btn, k, key] of quick) {
+      const n = me && me.s === 0 ? me.inv.filter(x => x.k === k).reduce((a, x) => a + x.n, 0) : 0;
+      if (!n) { input.buttons[btn] = null; continue; }
+      const qb = { x: qx, y: (input.buttons.abil ? input.buttons.abil.y : H * 0.34), r: 22 };
+      input.buttons[btn] = qb;
+      const c = CONSUMABLES[k];
+      g.fillStyle = 'rgba(0,0,0,.6)'; g.beginPath(); g.arc(qb.x, qb.y, qb.r, 0, TAU); g.fill();
+      g.strokeStyle = c.color; g.lineWidth = 2; g.stroke();
+      g.fillStyle = c.color; g.font = `bold 15px ${FONT}`; g.textAlign = 'center'; g.fillText(c.icon, qb.x, qb.y + 5);
+      g.fillStyle = '#fff'; g.font = `bold 10px ${FONT}`; g.fillText(n, qb.x + 14, qb.y + 18);
+      if (!touch) { g.fillStyle = '#888'; g.fillText(key, qb.x, qb.y - 26); }
+      qx -= 54;
+    }
 
     if (this.hudOnly) this.drawFpsHud(g, snap, me, input, touch);
     else input.buttons.fire = null;

@@ -115,6 +115,7 @@ function rejoin(conn) {
   if (!g || !g.players[old.id]) return;
   g.removePlayer(conn.peer);
   const p = g.players[old.id];
+  p.cmdAck = 0;   // Gerät zählt seine Befehle evtl. neu
   delete g.players[old.id];
   p.id = conn.peer;
   g.players[conn.peer] = p;
@@ -322,6 +323,7 @@ function setView(v) {
   input.setFps(v === '3d');
 }
 input.onView = toggleView;
+input.onBag = tab => toggleInv(tab);
 
 // ---------- Spiel ----------
 function enterGame() {
@@ -334,6 +336,7 @@ function enterGame() {
 
 function showOver(snap) {
   if (app.overShown) return;
+  closeInv();
   app.overShown = true;
   const rows = snap.pl.slice().sort((a, b) => b.k - a.k).map(p =>
     `<tr><td><span class="dot" style="background:${CLASSES[p.c].color}"></span>P${p.n} ${CLASSES[p.c].name}</td><td>${p.k}</td><td>${p.pts}</td></tr>`).join('');
@@ -363,7 +366,7 @@ function predict(dt) {
     let mx = input.state.mx, my = input.state.my;
     const l = Math.hypot(mx, my);
     if (l > 1) { mx /= l; my /= l; }
-    const sp = me.s === 1 ? CFG.DOWN_SPEED : CFG.PLAYER_SPEED;
+    const sp = me.s === 1 ? CFG.DOWN_SPEED : (me.sp || CFG.PLAYER_SPEED);
     pred.x += mx * sp * dt; pred.y += my * sp * dt;
     pushOut(pred, CFG.PLAYER_R, predSolids);
     const ex = pred.sx - pred.x, ey = pred.sy - pred.y, err = Math.hypot(ex, ey);
@@ -436,6 +439,8 @@ function loop(now) {
     if (app.snap) {
       for (const e of evs) if (e.k === 'kill' && e.zi) app.deadZ.set(e.zi, performance.now());
       if (!app.isHost) predict(dt);
+      const meNow = app.snap.pl.find(p => p.id === app.myId);
+      if (meNow) { input.ack(meNow.ca); updateInv(meNow); }
       const view = app.isHost ? app.snap : viewSnap();
       renderer.onEvents(evs, view, app.myId, sfx);
       if (renderer3d) renderer3d.onEvents(evs, app.myId, view);
