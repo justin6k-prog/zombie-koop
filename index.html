@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Zombie Koop – Verbindungstest</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #111; color: #eee; font-family: -apple-system, system-ui, sans-serif; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; }
+  #menu { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 16px; text-align: center; }
+  #menu h1 { font-size: 22px; margin: 0 0 8px; }
+  button, input { font-size: 20px; padding: 12px 20px; border-radius: 10px; border: none; }
+  button { background: #3a8; color: #fff; min-width: 220px; }
+  button.alt { background: #38a; }
+  input { width: 140px; text-align: center; text-transform: uppercase; letter-spacing: 4px; }
+  #game { position: fixed; inset: 0; display: none; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #hud { position: fixed; top: 8px; left: 8px; right: 8px; font-size: 14px; pointer-events: none; text-shadow: 0 1px 2px #000; }
+  #msg { color: #f88; font-size: 16px; min-height: 20px; }
+</style>
+</head>
+<body>
+<div id="menu">
+  <h1>Zombie Koop – Verbindungstest</h1>
+  <button id="btnHost">Spiel erstellen</button>
+  <div>oder</div>
+  <input id="code" maxlength="4" placeholder="CODE">
+  <button id="btnJoin" class="alt">Beitreten</button>
+  <div id="msg"></div>
+</div>
+<div id="game">
+  <canvas id="cv"></canvas>
+  <div id="hud"></div>
+</div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+// Spielwelt in festen Einheiten, wird auf den Bildschirm skaliert
+const W = 800, H = 450, SPEED = 220, SIZE = 18;
+const COLORS = ['#4c4', '#4af', '#fa4', '#f6c'];
+const PREFIX = 'zk-test-';
+
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+
+let peer, isHost = false, myId = null, roomCode = '';
+let conns = [];          // Host: Verbindungen zu den Mitspielern
+let hostConn = null;     // Mitspieler: Verbindung zum Host
+let state = { players: {} };   // vom Host berechneter Spielstand
+let shown = {};                // geglättete Anzeige-Positionen
+let input = { dx: 0, dy: 0 };
+let ping = null;
+
+function showMsg(t) { $('msg').textContent = t; }
+
+function makeCode() {
+  const abc = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let c = '';
+  for (let i = 0; i < 4; i++) c += abc[Math.floor(Math.random() * abc.length)];
+  return c;
+}
+
+// ---------- Host ----------
+function startHost() {
+  roomCode = makeCode();
+  isHost = true;
+  showMsg('Verbinde mit Vermittlung …');
+  peer = new Peer(PREFIX + roomCode);
+  peer.on('open', () => {
+    myId = 'host';
+    addPlayer('host');
+    enterGame();
+  });
+  peer.on('connection', conn => {
+    conn.on('open', () => {
+      conns.push(conn);
+      lastSeen[conn.peer] = performance.now();
+      addPlayer(conn.peer);
+    });
+    conn.on('data', d => {
+      lastSeen[conn.peer] = performance.now();
+      const p = state.players[conn.peer];
+      if (d.t === 'in' && p) { p.dx = d.dx; p.dy = d.dy; }
+      if (d.t === 'ping') conn.send({ t: 'pong', ts: d.ts });
+    });
+    conn.on('close', () => {
+      conns = conns.filter(c => c !== conn);
+      delete state.players[conn.peer];
+    });
+  });
+  peer.on('error', e => {
+    if (e.type === 'unavailable-id') { peer.destroy(); startHost(); return; }
+    showMsg('Fehler: ' + e.type);
+  });
+}
+
+function addPlayer(id) {
+  const n = Object.keys(state.players).length;
+  state.players[id] = { x: 150 + n * 120, y: H / 2, dx: 0, dy: 0, c: COLORS[n % COLORS.length], n: n + 1 };
+}
+
+function hostTick(dt) {
+  state.players.host.dx = input.dx;
+  state.players.host.dy = input.dy;
+  for (const p of Object.values(state.players)) {
+    p.x = Math.max(SIZE, Math.min(W - SIZE, p.x + p.dx * SPEED * dt));
+    p.y = Math.max(SIZE, Math.min(H - SIZE, p.y + p.dy * SPEED * dt));
+  }
+}
+
+// "close" wird von PeerJS nicht zuverlässig gemeldet: wer 3 Sek. still ist, fliegt raus
+const lastSeen = {};
+setInterval(() => {
+  if (!isHost) return;
+  const now = performance.now();
+  for (const c of conns) {
+    if (now - (lastSeen[c.peer] ?? now) > 3000) {
+      c.close();
+      delete state.players[c.peer];
+      delete lastSeen[c.peer];
+    }
+  }
+  conns = conns.filter(c => state.players[c.peer]);
+}, 1000);
+
+// 20x pro Sekunde den Spielstand an alle schicken
+setInterval(() => {
+  if (!isHost) return;
+  const msg = { t: 'state', players: state.players };
+  for (const c of conns) if (c.open) c.send(msg);
+}, 50);
+
+// ---------- Mitspieler ----------
+function startJoin() {
+  roomCode = $('code').value.trim().toUpperCase();
+  if (roomCode.length !== 4) { showMsg('Bitte 4-stelligen Code eingeben'); return; }
+  showMsg('Verbinde …');
+  peer = new Peer();
+  peer.on('open', id => {
+    myId = id;
+    hostConn = peer.connect(PREFIX + roomCode, { reliable: false });
+    const timeout = setTimeout(() => showMsg('Keine Verbindung zum Host. Gleiches WLAN/Hotspot?'), 10000);
+    hostConn.on('open', () => { clearTimeout(timeout); enterGame(); });
+    hostConn.on('data', d => {
+      hostSeen = performance.now();
+      if (d.t === 'state') state.players = d.players;
+      if (d.t === 'pong') ping = Math.round(performance.now() - d.ts);
+    });
+    hostConn.on('close', () => {
+      if (hostLost) return;
+      hostLost = true;
+      alert('Verbindung zum Host verloren');
+      location.reload();
+    });
+  });
+  peer.on('error', e => {
+    showMsg(e.type === 'peer-unavailable' ? 'Code nicht gefunden' : 'Fehler: ' + e.type);
+  });
+}
+
+// Eingaben 20x pro Sekunde an den Host, Ping jede Sekunde
+setInterval(() => {
+  if (hostConn && hostConn.open) hostConn.send({ t: 'in', dx: input.dx, dy: input.dy });
+}, 50);
+let hostSeen = null, hostLost = false;
+setInterval(() => {
+  if (hostConn && hostConn.open) hostConn.send({ t: 'ping', ts: performance.now() });
+  if (hostSeen && !hostLost && performance.now() - hostSeen > 3000) {
+    hostLost = true;
+    alert('Verbindung zum Host verloren');
+    location.reload();
+  }
+}, 1000);
+
+// ---------- Steuerung: Joystick (Touch) + WASD/Pfeile (PC) ----------
+let stick = null; // { id, ox, oy, x, y }
+
+cv.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (!stick && t.clientX < innerWidth / 2) stick = { id: t.identifier, ox: t.clientX, oy: t.clientY, x: t.clientX, y: t.clientY };
+  }
+}, { passive: false });
+cv.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (stick && t.identifier === stick.id) { stick.x = t.clientX; stick.y = t.clientY; }
+  }
+  updateStick();
+}, { passive: false });
+function endTouch(e) {
+  for (const t of e.changedTouches) if (stick && t.identifier === stick.id) stick = null;
+  updateStick();
+}
+cv.addEventListener('touchend', endTouch);
+cv.addEventListener('touchcancel', endTouch);
+
+function updateStick() {
+  if (!stick) { input.dx = 0; input.dy = 0; return; }
+  const R = 60;
+  let dx = stick.x - stick.ox, dy = stick.y - stick.oy;
+  const len = Math.hypot(dx, dy);
+  if (len > R) { dx = dx / len * R; dy = dy / len * R; }
+  input.dx = dx / R; input.dy = dy / R;
+}
+
+const keys = {};
+addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; updateKeys(); });
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; updateKeys(); });
+function updateKeys() {
+  if (stick) return;
+  let dx = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0);
+  let dy = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0);
+  const len = Math.hypot(dx, dy) || 1;
+  input.dx = dx / len; input.dy = dy / len;
+}
+
+// ---------- Anzeige ----------
+let scale = 1, offX = 0, offY = 0;
+function resize() {
+  const dpr = devicePixelRatio || 1;
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr;
+  scale = Math.min(innerWidth / W, innerHeight / H);
+  offX = (innerWidth - W * scale) / 2; offY = (innerHeight - H * scale) / 2;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener('resize', resize);
+
+function draw() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, innerWidth, innerHeight);
+  ctx.save();
+  ctx.translate(offX, offY);
+  ctx.scale(scale, scale);
+  ctx.fillStyle = '#2a2a2a';
+  ctx.fillRect(0, 0, W, H);
+
+  for (const [id, p] of Object.entries(state.players)) {
+    // weich zur neuesten Position gleiten
+    const s = shown[id] || (shown[id] = { x: p.x, y: p.y });
+    s.x += (p.x - s.x) * 0.35; s.y += (p.y - s.y) * 0.35;
+    ctx.fillStyle = p.c;
+    ctx.beginPath(); ctx.arc(s.x, s.y, SIZE, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 16px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(p.n, s.x, s.y);
+    if (id === myId) {
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(s.x, s.y, SIZE + 4, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+  for (const id in shown) if (!state.players[id]) delete shown[id];
+  ctx.restore();
+
+  if (stick) {
+    ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(stick.ox, stick.oy, 60, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.5)';
+    ctx.beginPath(); ctx.arc(stick.ox + input.dx * 60, stick.oy + input.dy * 60, 22, 0, Math.PI * 2); ctx.fill();
+  }
+
+  const count = Object.keys(state.players).length;
+  $('hud').textContent = isHost
+    ? `HOST · Code: ${roomCode} · Spieler: ${count}`
+    : `Code: ${roomCode} · Spieler: ${count} · Ping: ${ping ?? '…'} ms`;
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (isHost) hostTick(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+async function keepAwake() {
+  try { if (navigator.wakeLock) await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
+
+function enterGame() {
+  $('menu').style.display = 'none';
+  $('game').style.display = 'block';
+  resize();
+  keepAwake();
+  requestAnimationFrame(loop);
+}
+
+$('btnHost').onclick = startHost;
+$('btnJoin').onclick = startJoin;
+</script>
+</body>
+</html>
